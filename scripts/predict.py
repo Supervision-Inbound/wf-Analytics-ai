@@ -1,4 +1,4 @@
-# scripts/predict.py — diagnóstico detallado
+# scripts/predict.py — diagnóstico detallado + scalerX aplicado
 import argparse, os, io, json, glob, sys, traceback
 from pathlib import Path
 from urllib.request import urlopen
@@ -20,18 +20,22 @@ FEATURES = [
     "llamadas_lag1","tmo_lag1","llamadas_lag24","tmo_lag24","llamadas_rolling_mean_3h"
 ]
 
+# Si tu CSV trae nombres distintos, puedes mapear aquí:
+RENOMBRES = {
+    # "Temp_prom_pais": "Temp_prom_nac",
+    # "Lluvia_total_pais": "Lluvia_total_nac",
+}
+
 LOCAL_CSV_CANDIDATES = [
     "dataset_trafico_clima_nacional_v2.csv",
     "*trafico*_clima*_v2*.csv",
 ]
-
 
 def _size(path: str):
     try:
         return os.path.getsize(path)
     except Exception:
         return None
-
 
 def _read_csv(path_or_url: str) -> pd.DataFrame:
     print(f"📥 Leyendo CSV desde: {path_or_url}")
@@ -55,7 +59,6 @@ def _read_csv(path_or_url: str) -> pd.DataFrame:
                 last_err = e
         raise last_err
 
-
 def _find_local_csv() -> str | None:
     for pat in LOCAL_CSV_CANDIDATES:
         hits = glob.glob(pat)
@@ -63,14 +66,12 @@ def _find_local_csv() -> str | None:
             return hits[0]
     return None
 
-
 def _die(msg: str, ex: Exception | None = None):
     print("\n❌ " + msg)
     if ex is not None:
         print("—— Traceback ——")
         traceback.print_exc()
     sys.exit(1)
-
 
 def main():
     ap = argparse.ArgumentParser()
@@ -96,7 +97,11 @@ def main():
     try:
         df = _read_csv(csv_path)
     except Exception as e:
-        _die(f"No pude leer el CSV ({csv_path}). Prueba sin separadores raros/Excel; exporta a CSV simple.", e)
+        _die(f"No pude leer el CSV ({csv_path}). Exporta a CSV simple (coma) sin formatos de Excel.", e)
+
+    # renombrar si procede
+    if RENOMBRES:
+        df = df.rename(columns=RENOMBRES)
 
     # normalizaciones suaves
     if "fecha_dt" in df.columns:
@@ -123,16 +128,44 @@ def main():
     except Exception as e:
         _die("Error cargando modelo o scalers", e)
 
-    # inferencia
+    # preparar e inferir (con scalerX)
     try:
+        from sklearn.utils.validation import check_array
         X  = df[FEATURES].astype(float).values
-        from sklearn.utils.validation import check_array  # sanity import
-        _ = check_array(X)  # valida forma
-        print("⏳ Inferencia…")
-        y_pred_s = model.predict(X, verbose=0)  # scalerX se aplicó en entrenamiento; si usaste scalerX, cámbialo aquí
-        # Si tu entrenamiento usaba scalerX/ scalerY, descomenta estas dos líneas:
-        # Xs = scalerX.transform(X)
-        # y_pred_s = model.predict(Xs, verbose=0)
+        check_array(X)
+        Xs = scalerX.transform(X)
 
-        y_pred   = scalerY.inverse_transform(y_pred_s)
-        if y_pred.shape_
+        print("⏳ Inferencia con X escalado…")
+        y_pred_s = model.predict(Xs, verbose=0)
+
+        y_pred = scalerY.inverse_transform(y_pred_s)
+        if y_pred.shape[1] >= 2:
+            y_pred[:, 1] = np.expm1(y_pred[:, 1])  # revertir log del TMO
+    except Exception as e:
+        _die("Error durante la inferencia (forma de X, scalerX/scalerY o modelo).", e)
+
+    # salida
+    items = []
+    has_fecha = "fecha_dt" in df.columns
+    has_hora  = "hora" in df.columns
+    for i in range(len(df)):
+        item = {
+            "pred_llamadas": float(y_pred[i, 0]),
+            "pred_tmo_min":  float(y_pred[i, 1]) if y_pred.shape[1] >= 2 else None,
+            "fecha_dt": (df.at[i, "fecha_dt"].isoformat() if has_fecha and pd.notna(df.at[i, "fecha_dt"]) else None),
+            "hora": (int(df.at[i, "hora"]) if has_hora and pd.notna(df.at[i, "hora"]) else None),
+        }
+        items.append(item)
+
+    os.makedirs(os.path.dirname(args.out), exist_ok=True)
+    with open(args.out, "w", encoding="utf-8") as f:
+        json.dump(
+            {"generated_at": pd.Timestamp.utcnow().isoformat(),
+             "source": csv_path, "count": len(items), "items": items[:500]},
+            f, ensure_ascii=False, indent=2)
+
+    print(f"✅ Predicciones guardadas en {args.out} (filas: {len(items)})")
+
+if __name__ == "__main__":
+    main()
+
