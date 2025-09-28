@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "0 10,22 * * *"   # 2 veces al día (UTC)
+    - cron: "0 10,22 * * *"
 
 jobs:
   predict:
@@ -74,7 +74,7 @@ jobs:
           fi
 
       - name: Commit predicciones.json
-        if: success()   # solo si pasó la verificación
+        if: success()
         run: |
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
