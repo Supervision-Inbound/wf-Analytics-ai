@@ -1,80 +1,13 @@
-name: generar-predicciones
-
-on:
-  workflow_dispatch:
-    inputs:
-      csv_url:
-        description: "URL del CSV (19 features). Si vacío, usa el CSV local del repo."
-        required: false
-        default: ""
-  schedule:
-    - cron: "0 10,22 * * *"   # 2 veces al día (UTC)
-
-jobs:
-  predict:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.10"
-          cache: "pip"
-          cache-dependency-path: "requirements.txt"  # 👈 importante
-
-      - name: Install deps
-        run: |
-          python -m pip install -U pip wheel setuptools
-          pip install -r requirements.txt
-          python - <<'PY'
-          import sys, tensorflow as tf, numpy, pandas
-          print("PY:", sys.version)
-          print("TF:", tf.__version__)
-          print("NP:", numpy.__version__)
-          print("PD:", pandas.__version__)
-          PY
-
-      - name: Debug repo + CSV
-        run: |
-          ls -lah
-          python - <<'PY'
-          import glob, pandas as pd
-          path = None
-          for pat in ["dataset_trafico_clima_nacional_v2.csv","*trafico_clima*_v2*.csv"]:
-              g = glob.glob(pat)
-              if g: path = g[0]; break
-          print("Local CSV:", path)
-          if path:
-              df = pd.read_csv(path, nrows=3)
-              print("Columns:", df.columns.tolist())
-              print(df.head())
-          PY
-
       - name: Run predict
         env:
           CSV_URL: ${{ github.event.inputs.csv_url }}
         run: |
+          set -euxo pipefail
           if [ -n "${CSV_URL}" ]; then
             python scripts/predict.py --csv "${CSV_URL}" --out public/predicciones.json
           else
             python scripts/predict.py --out public/predicciones.json
           fi
-          ls -lah public/
-          head -c 600 public/predicciones.json || true
-          echo
-
-      - name: Commit predicciones.json
-        run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/predicciones.json
-          if git commit -m "chore: update predicciones.json"; then
-            git push
-          else
-            echo "No changes to commit."
+          ls -lah public/ || true
+          head -c 800 public/predicciones.json || true
 
