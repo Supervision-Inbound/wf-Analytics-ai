@@ -1,12 +1,15 @@
-# scripts/predict.py — versión tolerante con diagnóstico claro
-import argparse, os, io, json, glob
+# scripts/predict.py — diagnóstico detallado
+import argparse, os, io, json, glob, sys, traceback
 from pathlib import Path
 from urllib.request import urlopen
 
 import numpy as np
 import pandas as pd
-import joblib
-import tensorflow as tf
+
+# === artefactos esperados en la RAÍZ ===
+MODEL_FILE   = "modelo_trafico_clima_v2.h5"
+SCALER_X_PKL = "scaler_X_v2.pkl"
+SCALER_Y_PKL = "scaler_y_v2.pkl"
 
 # === columnas esperadas (19 features) ===
 FEATURES = [
@@ -17,35 +20,40 @@ FEATURES = [
     "llamadas_lag1","tmo_lag1","llamadas_lag24","tmo_lag24","llamadas_rolling_mean_3h"
 ]
 
-# artefactos (en la raíz del repo, como los subiste)
-MODEL_FILE   = "modelo_trafico_clima_v2.h5"
-SCALER_X_PKL = "scaler_X_v2.pkl"
-SCALER_Y_PKL = "scaler_y_v2.pkl"
-
-# candidatos de CSV local
 LOCAL_CSV_CANDIDATES = [
     "dataset_trafico_clima_nacional_v2.csv",
     "*trafico*_clima*_v2*.csv",
 ]
 
 
+def _size(path: str):
+    try:
+        return os.path.getsize(path)
+    except Exception:
+        return None
+
+
 def _read_csv(path_or_url: str) -> pd.DataFrame:
-    """Lee CSV desde ruta o URL. NO obliga 'fecha_dt' ni 'hora'."""
+    print(f"📥 Leyendo CSV desde: {path_or_url}")
+    try_encodings = ["utf-8", "utf-8-sig", "latin-1"]
     if path_or_url.startswith(("http://", "https://")):
         with urlopen(path_or_url) as r:
             data = r.read()
-        df = pd.read_csv(io.BytesIO(data))
+        last_err = None
+        for enc in try_encodings:
+            try:
+                return pd.read_csv(io.BytesIO(data), encoding=enc)
+            except Exception as e:
+                last_err = e
+        raise last_err
     else:
-        df = pd.read_csv(path_or_url)
-
-    # si existe 'fecha_dt', parsea a datetime (si no, la dejamos ausente)
-    if "fecha_dt" in df.columns:
-        df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
-    # si existe 'hora', intenta a entero
-    if "hora" in df.columns:
-        df["hora"] = pd.to_numeric(df["hora"], errors="coerce").astype("Int64")
-
-    return df
+        last_err = None
+        for enc in try_encodings:
+            try:
+                return pd.read_csv(path_or_url, encoding=enc)
+            except Exception as e:
+                last_err = e
+        raise last_err
 
 
 def _find_local_csv() -> str | None:
@@ -56,92 +64,75 @@ def _find_local_csv() -> str | None:
     return None
 
 
+def _die(msg: str, ex: Exception | None = None):
+    print("\n❌ " + msg)
+    if ex is not None:
+        print("—— Traceback ——")
+        traceback.print_exc()
+    sys.exit(1)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv", default="", help="Ruta o URL del CSV con las 19 features")
     ap.add_argument("--out", default="public/predicciones.json", help="Salida JSON")
     args = ap.parse_args()
 
-    # --- verificar artefactos ---
-    missing_files = [p for p in [MODEL_FILE, SCALER_X_PKL, SCALER_Y_PKL] if not Path(p).exists()]
-    if missing_files:
-        raise SystemExit(f"❌ Faltan artefactos del modelo en la raíz: {missing_files}")
+    print("📂 Archivos en raíz:", os.listdir("."))
+    print(f"ℹ️ Tamaños: {MODEL_FILE}={_size(MODEL_FILE)}, {SCALER_X_PKL}={_size(SCALER_X_PKL)}, {SCALER_Y_PKL}={_size(SCALER_Y_PKL)}")
 
-    # --- resolver CSV ---
+    # artefactos
+    missing = [p for p in [MODEL_FILE, SCALER_X_PKL, SCALER_Y_PKL] if not Path(p).exists()]
+    if missing:
+        _die(f"Faltan artefactos del modelo en la raíz: {missing}")
+
+    # CSV
     csv_path = args.csv.strip() or _find_local_csv()
     if not csv_path:
-        raise SystemExit("❌ No encontré CSV local. Sube 'dataset_trafico_clima_nacional_v2.csv' o usa --csv URL")
+        _die("No encontré CSV local. Sube 'dataset_trafico_clima_nacional_v2.csv' o usa --csv URL")
+    print(f"ℹ️ CSV elegido: {csv_path}")
 
-    print(f"ℹ️ CSV a usar: {csv_path}")
+    # leer CSV
+    try:
+        df = _read_csv(csv_path)
+    except Exception as e:
+        _die(f"No pude leer el CSV ({csv_path}). Prueba sin separadores raros/Excel; exporta a CSV simple.", e)
 
-    # --- leer CSV y mostrar diagnóstico ---
-    df = _read_csv(csv_path)
+    # normalizaciones suaves
+    if "fecha_dt" in df.columns:
+        df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
+    if "hora" in df.columns:
+        df["hora"] = pd.to_numeric(df["hora"], errors="coerce").astype("Int64")
+
     print("🔎 Columnas detectadas:", list(df.columns))
     print("🔎 Primeras filas:\n", df.head(3))
 
-    # --- validar columnas necesarias ---
+    # validar features
     missing_cols = [c for c in FEATURES if c not in df.columns]
     if missing_cols:
-        raise SystemExit(f"❌ Faltan columnas requeridas para el modelo: {missing_cols}\n"
-                         f"✅ Presentes: {[c for c in FEATURES if c in df.columns]}")
+        present = [c for c in FEATURES if c in df.columns]
+        _die(f"FALTAN columnas requeridas para el modelo: {missing_cols}\nPRESENTES: {present}")
 
-    # --- cargar modelo y scalers ---
+    # cargar modelo y scalers
     print("⏳ Cargando modelo y scalers…")
-    model   = tf.keras.models.load_model(MODEL_FILE)
-    scalerX = joblib.load(SCALER_X_PKL)
-    scalerY = joblib.load(SCALER_Y_PKL)
+    try:
+        import joblib, tensorflow as tf
+        model   = tf.keras.models.load_model(MODEL_FILE)
+        scalerX = joblib.load(SCALER_X_PKL)
+        scalerY = joblib.load(SCALER_Y_PKL)
+    except Exception as e:
+        _die("Error cargando modelo o scalers", e)
 
-    # --- preparar y predecir ---
-    X  = df[FEATURES].astype(float).values
-    Xs = scalerX.transform(X)
-    print("⏳ Inferencia…")
-    y_pred_s = model.predict(Xs, verbose=0)
-    y_pred   = scalerY.inverse_transform(y_pred_s)
+    # inferencia
+    try:
+        X  = df[FEATURES].astype(float).values
+        from sklearn.utils.validation import check_array  # sanity import
+        _ = check_array(X)  # valida forma
+        print("⏳ Inferencia…")
+        y_pred_s = model.predict(X, verbose=0)  # scalerX se aplicó en entrenamiento; si usaste scalerX, cámbialo aquí
+        # Si tu entrenamiento usaba scalerX/ scalerY, descomenta estas dos líneas:
+        # Xs = scalerX.transform(X)
+        # y_pred_s = model.predict(Xs, verbose=0)
 
-    # índice 1 corresponde a 'tmo' → revertir log1p aplicado en entrenamiento
-    if y_pred.shape[1] >= 2:
-        y_pred[:, 1] = np.expm1(y_pred[:, 1])
-
-    # --- armar JSON de salida (fecha/hora son opcionales) ---
-    items = []
-    has_fecha = "fecha_dt" in df.columns
-    has_hora  = "hora" in df.columns
-    for i in range(len(df)):
-        item = {
-            "pred_llamadas": float(y_pred[i, 0]),
-            "pred_tmo_min":  float(y_pred[i, 1]) if y_pred.shape[1] >= 2 else None,
-        }
-        if has_fecha:
-            val = df.at[i, "fecha_dt"]
-            item["fecha_dt"] = (pd.to_datetime(val, errors="coerce").isoformat()
-                                if pd.notna(val) else None)
-        else:
-            item["fecha_dt"] = None
-
-        if has_hora:
-            hv = df.at[i, "hora"]
-            item["hora"] = int(hv) if pd.notna(hv) else None
-        else:
-            item["hora"] = None
-
-        items.append(item)
-
-    os.makedirs(os.path.dirname(args.out), exist_ok=True)
-    with open(args.out, "w", encoding="utf-8") as f:
-        json.dump(
-            {
-                "generated_at": pd.Timestamp.utcnow().isoformat(),
-                "source": csv_path,
-                "count": len(items),
-                "items": items[:500],
-            },
-            f,
-            ensure_ascii=False,
-            indent=2,
-        )
-
-    print(f"✅ Predicciones guardadas en {args.out} (filas: {len(items)})")
-
-
-if __name__ == "__main__":
-    main()
+        y_pred   = scalerY.inverse_transform(y_pred_s)
+        if y_pred.shape_
