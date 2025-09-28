@@ -8,7 +8,7 @@ on:
         required: false
         default: ""
   schedule:
-    - cron: "0 10,22 * * *"
+    - cron: "0 10,22 * * *"   # 2 veces al día (UTC)
 
 jobs:
   predict:
@@ -20,6 +20,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      # Escribimos requirements.txt con versiones fijadas (compatibles con TF 2.15)
       - name: Write requirements.txt (pinned)
         run: |
           cat > requirements.txt <<'REQ'
@@ -50,10 +51,9 @@ jobs:
           PY
 
       - name: Run predict (debug: no aborta el job)
-        env:
-          CSV_URL: ${{ github.event.inputs.csv_url }}
         run: |
           set -x
+          CSV_URL="${{ github.event.inputs.csv_url }}"
           if [ -n "${CSV_URL}" ]; then
             python scripts/predict.py --csv "${CSV_URL}" --out public/predicciones.json || true
           else
@@ -83,3 +83,4 @@ jobs:
             git push
           else
             echo "No changes to commit."
+
