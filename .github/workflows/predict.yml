@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       csv_url:
-        description: "URL del CSV (19 features). If empty, uses local CSV."
+        description: "URL del CSV (19 features). If empty, uses local CSV in the repo."
         required: false
         default: ""
   schedule:
@@ -52,30 +52,39 @@ jobs:
           print("PD:", pandas.__version__)
           PY
 
-      - name: Run predict (debug)
+      - name: Run predict
         shell: bash
         run: |
-          set -x
+          set -euxo pipefail
           CSV_URL="${{ github.event.inputs.csv_url }}"
           if [[ -n "$CSV_URL" ]]; then
-            python scripts/predict.py --csv "$CSV_URL" --out public/predicciones.json || true
+            python scripts/predict.py --csv "$CSV_URL" --out public/predicciones.json
           else
-            python scripts/predict.py --out public/predicciones.json || true
+            python scripts/predict.py --out public/predicciones.json
           fi
           echo "=== public/ ==="
           ls -lah public/ || true
           echo "=== JSON head ==="
-          head -c 1200 public/predicciones.json 2>/dev/null || echo "(no JSON)"
+          head -c 1200 public/predicciones.json 2>/dev/null || true
 
-      - name: Verify JSON
+      - name: Verify JSON content
         shell: bash
         run: |
-          if [[ -s public/predicciones.json ]]; then
-            echo "OK: JSON generated"
-          else
-            echo "::error::public/predicciones.json not generated"
-            exit 1
-          fi
+          set -euo pipefail
+          # Debe existir y ser JSON válido con las claves esperadas
+          python - <<'PY'
+          import json,sys,os
+          p="public/predicciones.json"
+          if not os.path.exists(p): 
+              sys.exit("predicciones.json not found")
+          with open(p, "r", encoding="utf-8") as f:
+              data=json.load(f)
+          for k in ("generated_at","items"):
+              if k not in data: 
+                  sys.exit(f"Missing key in JSON: {k}")
+          # Aceptamos items vacíos, pero dejamos aviso
+          print(f"OK JSON. items={len(data['items'])}")
+          PY
 
       - name: Commit JSON
         if: success()
@@ -85,10 +94,8 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-          # add the file (or any change inside public/)
           git add -A public/predicciones.json
 
-          # nothing staged? skip commit
           if git diff --cached --quiet; then
             echo "No changes to commit."
             exit 0
@@ -96,4 +103,3 @@ jobs:
 
           git commit -m "chore: update predicciones.json"
           git push
-
