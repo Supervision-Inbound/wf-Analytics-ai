@@ -81,11 +81,19 @@ jobs:
         if: success()
         shell: bash
         run: |
+          set -euo pipefail
           git config user.name  "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add public/predicciones.json
-          if git commit -m "chore: update predicciones.json"; then
-            git push
-          else
+
+          # add the file (or any change inside public/)
+          git add -A public/predicciones.json
+
+          # nothing staged? skip commit
+          if git diff --cached --quiet; then
             echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update predicciones.json"
+          git push
 
