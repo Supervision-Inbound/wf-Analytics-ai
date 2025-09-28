@@ -1,4 +1,4 @@
-# scripts/predict.py — diagnóstico detallado + scalerX aplicado
+# scripts/predict.py — diagnóstico detallado + scalerX aplicado + carga sin recompilar
 import argparse, os, io, json, glob, sys, traceback
 from pathlib import Path
 from urllib.request import urlopen
@@ -6,7 +6,7 @@ from urllib.request import urlopen
 import numpy as np
 import pandas as pd
 
-# === artefactos esperados en la RAÍZ ===
+# === artefactos esperados en la RAÍZ del repo ===
 MODEL_FILE   = "modelo_trafico_clima_v2.h5"
 SCALER_X_PKL = "scaler_X_v2.pkl"
 SCALER_Y_PKL = "scaler_y_v2.pkl"
@@ -20,7 +20,7 @@ FEATURES = [
     "llamadas_lag1","tmo_lag1","llamadas_lag24","tmo_lag24","llamadas_rolling_mean_3h"
 ]
 
-# Si tu CSV trae nombres distintos, puedes mapear aquí:
+# Si tu CSV usa nombres distintos, puedes mapearlos aquí:
 RENOMBRES = {
     # "Temp_prom_pais": "Temp_prom_nac",
     # "Lluvia_total_pais": "Lluvia_total_nac",
@@ -82,28 +82,28 @@ def main():
     print("📂 Archivos en raíz:", os.listdir("."))
     print(f"ℹ️ Tamaños: {MODEL_FILE}={_size(MODEL_FILE)}, {SCALER_X_PKL}={_size(SCALER_X_PKL)}, {SCALER_Y_PKL}={_size(SCALER_Y_PKL)}")
 
-    # artefactos
+    # artefactos presentes
     missing = [p for p in [MODEL_FILE, SCALER_X_PKL, SCALER_Y_PKL] if not Path(p).exists()]
     if missing:
         _die(f"Faltan artefactos del modelo en la raíz: {missing}")
 
-    # CSV
+    # CSV a utilizar
     csv_path = args.csv.strip() or _find_local_csv()
     if not csv_path:
         _die("No encontré CSV local. Sube 'dataset_trafico_clima_nacional_v2.csv' o usa --csv URL")
     print(f"ℹ️ CSV elegido: {csv_path}")
 
-    # leer CSV
+    # lectura CSV
     try:
         df = _read_csv(csv_path)
     except Exception as e:
-        _die(f"No pude leer el CSV ({csv_path}). Exporta a CSV simple (coma) sin formatos de Excel.", e)
+        _die(f"No pude leer el CSV ({csv_path}). Exporta a CSV simple (coma) y UTF-8.", e)
 
-    # renombrar si procede
+    # renombres si corresponde
     if RENOMBRES:
         df = df.rename(columns=RENOMBRES)
 
-    # normalizaciones suaves
+    # normalizaciones “suaves”
     if "fecha_dt" in df.columns:
         df["fecha_dt"] = pd.to_datetime(df["fecha_dt"], errors="coerce")
     if "hora" in df.columns:
@@ -118,17 +118,19 @@ def main():
         present = [c for c in FEATURES if c in df.columns]
         _die(f"FALTAN columnas requeridas para el modelo: {missing_cols}\nPRESENTES: {present}")
 
-    # cargar modelo y scalers
+    # cargar modelo y scalers (SIN recompilar)
     print("⏳ Cargando modelo y scalers…")
     try:
         import joblib, tensorflow as tf
-        model   = tf.keras.models.load_model(MODEL_FILE)
+        # ← cambio clave: compile=False, evita problemas de versiones Keras/TF
+        model   = tf.keras.models.load_model(MODEL_FILE, compile=False)
         scalerX = joblib.load(SCALER_X_PKL)
         scalerY = joblib.load(SCALER_Y_PKL)
+        print("✅ Modelo y scalers cargados.")
     except Exception as e:
         _die("Error cargando modelo o scalers", e)
 
-    # preparar e inferir (con scalerX)
+    # preparar e inferir (aplicando scalerX como en entrenamiento)
     try:
         from sklearn.utils.validation import check_array
         X  = df[FEATURES].astype(float).values
@@ -138,13 +140,14 @@ def main():
         print("⏳ Inferencia con X escalado…")
         y_pred_s = model.predict(Xs, verbose=0)
 
+        # devolver y a escala original
         y_pred = scalerY.inverse_transform(y_pred_s)
         if y_pred.shape[1] >= 2:
-            y_pred[:, 1] = np.expm1(y_pred[:, 1])  # revertir log del TMO
+            y_pred[:, 1] = np.expm1(y_pred[:, 1])  # revertir log para TMO
     except Exception as e:
         _die("Error durante la inferencia (forma de X, scalerX/scalerY o modelo).", e)
 
-    # salida
+    # generar salida JSON
     items = []
     has_fecha = "fecha_dt" in df.columns
     has_hora  = "hora" in df.columns
@@ -168,4 +171,5 @@ def main():
 
 if __name__ == "__main__":
     main()
+
 
