@@ -1,0 +1,50 @@
+name: generar-predicciones
+
+on:
+  workflow_dispatch:
+    inputs:
+      csv_url:
+        description: "URL del CSV (19 features). Si vacío, usa el CSV local del repo."
+        required: false
+        default: ""
+  schedule:
+    - cron: "0 10,22 * * *"   # 10:00 y 22:00 UTC → cámbialo si quieres
+
+jobs:
+  predict:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write  # permite commitear el JSON
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+
+      - name: Install deps
+        run: |
+          python -m pip install -U pip
+          pip install -r requirements-ml.txt
+
+      - name: Run predict (local CSV o URL)
+        env:
+          CSV_URL: ${{ github.event.inputs.csv_url }}
+        run: |
+          if [ -n "${CSV_URL}" ]; then
+            python scripts/predict.py --csv "${CSV_URL}" --out public/predicciones.json
+          else
+            python scripts/predict.py --out public/predicciones.json
+          fi
+
+      - name: Commit predicciones.json
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/predicciones.json
+          if git commit -m "chore: update predicciones.json"; then
+            git push
+          else
+            echo "No changes to commit."
